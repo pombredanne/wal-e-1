@@ -1,10 +1,11 @@
 import json
 
-from wal_e.blobstore import swift
+from wal_e.blobstore import gs
 from wal_e.storage.base import BackupInfo
 
 
-class SwiftBackupInfo(BackupInfo):
+class GSBackupInfo(BackupInfo):
+
     def load_detail(self, conn):
         if self._details_loaded:
             return
@@ -14,7 +15,8 @@ class SwiftBackupInfo(BackupInfo):
             bucket=self.layout.store_name(),
             path=self.layout.basebackup_sentinel(self))
 
-        data = json.loads(swift.uri_get_file(None, uri, conn=conn))
+        data = json.loads(gs.uri_get_file(None, uri, conn=conn)
+                          .decode('utf-8'))
         for k, v in list(data.items()):
             setattr(self, k, v)
 

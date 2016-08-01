@@ -92,7 +92,7 @@ def test_cert_validation_sensitivity(monkeypatch):
             cinfo = calling_format.from_store_name(bn)
             assert (cinfo.calling_format == connection.OrdinaryCallingFormat)
             assert cinfo.region == 'us-east-1'
-            assert cinfo.ordinary_endpoint == u's3.amazonaws.com'
+            assert cinfo.ordinary_endpoint == 's3.amazonaws.com'
 
 
 @pytest.mark.skipif("no_real_s3_credentials()")
@@ -154,7 +154,7 @@ def test_str_repr_call_info(monkeypatch):
     assert repr(cinfo) == (
         "CallingInfo(hello.world, "
         "<class 'boto.s3.connection.OrdinaryCallingFormat'>, "
-        "'us-east-1', u's3.amazonaws.com')"
+        "'us-east-1', 's3.amazonaws.com')"
     )
 
     cinfo = calling_format.from_store_name('Hello-World')
@@ -162,12 +162,11 @@ def test_str_repr_call_info(monkeypatch):
     assert repr(cinfo) == (
         "CallingInfo(Hello-World, "
         "<class 'boto.s3.connection.OrdinaryCallingFormat'>, "
-        "'us-east-1', u's3.amazonaws.com')"
+        "'us-east-1', 's3.amazonaws.com')"
     )
 
 
 @pytest.mark.skipif("no_real_s3_credentials()")
-@pytest.mark.skipif("sys.version_info < (2, 7)")
 def test_cipher_suites():
     # Imported for its side effects of setting up ssl cipher suites
     # and gevent.
@@ -193,15 +192,20 @@ def test_cipher_suites():
     if 'port' in spec.args:
         kw['port'] = 443
 
-    htcon = conn._pool.get_http_connection(**kw)
-
+    htcon = conn.new_http_connection(**kw)
+    htcon.connect()
     chosen_cipher_suite = htcon.sock.cipher()[0].split('-')
 
     # Test for the expected cipher suite.
     #
-    # This can change or vary on different platforms somewhat
-    # harmlessly, but do the simple thing and insist on an exact match
-    # for now.
-    assert (chosen_cipher_suite == ['AES256', 'SHA']
-            or chosen_cipher_suite == ['AES128', 'SHA']
-            or chosen_cipher_suite == ['ECDHE', 'RSA', 'AES128', 'SHA'])
+    # This can change or vary on different platforms and over time as
+    # new suites are phased in harmlessly, but do the simple thing and
+    # insist on an exact match for now.
+    acceptable = [
+        ['AES256', 'SHA'],
+        ['AES128', 'SHA'],
+        ['ECDHE', 'RSA', 'AES128', 'SHA'],
+        ['ECDHE', 'RSA', 'AES128', 'GCM', 'SHA256']
+    ]
+
+    assert chosen_cipher_suite in acceptable

@@ -18,77 +18,61 @@ def gevent_monkey(*args, **kwargs):
 # sadly it cannot be used (easily) in WAL-E.
 gevent_monkey()
 
-# Instate a cipher suite that bans a series of weak and slow ciphers.
-# Both RC4 (weak) 3DES (slow) have been seen in use.
-#
-# Only Python 2.7+ possesses the 'ciphers' keyword to wrap_socket.
-if sys.version_info >= (2, 7):
-    def getresponse_monkey():
-        import httplib
-        original = httplib.HTTPConnection.getresponse
 
-        def monkey(*args, **kwargs):
-            kwargs['buffering'] = True
-            return original(*args, **kwargs)
+def ssl_monkey():
+    import ssl
 
-        httplib.HTTPConnection.getresponse = monkey
+    original = ssl.wrap_socket
 
-    getresponse_monkey()
+    def wrap_socket_monkey(*args, **kwargs):
+        # Set up an OpenSSL cipher string.
+        #
+        # Rationale behind each part:
+        #
+        # * HIGH: only use the most secure class of ciphers and
+        #   key lengths, generally being 128 bits and larger.
+        #
+        # * !aNULL: exclude cipher suites that contain anonymous
+        #   key exchange, making man in the middle attacks much
+        #   more tractable.
+        #
+        # * !SSLv2: exclude any SSLv2 cipher suite, as this
+        #   category has security weaknesses.  There is only one
+        #   OpenSSL cipher suite that is in the "HIGH" category
+        #   but uses SSLv2 protocols: DES_192_EDE3_CBC_WITH_MD5
+        #   (see s2_lib.c)
+        #
+        #   Technically redundant given "!3DES", but the intent in
+        #   listing it here is more apparent.
+        #
+        # * !RC4: exclude because it's a weak block cipher.
+        #
+        # * !3DES: exclude because it's very CPU intensive and
+        #   most peers support another reputable block cipher.
+        #
+        # * !MD5: although it doesn't seem use of known flaws in
+        #   MD5 is able to compromise an SSL session, the wide
+        #   deployment of SHA-family functions means the
+        #   compatibility benefits of allowing it are slim to
+        #   none, so disable it until someone produces material
+        #   complaint.
+        kwargs['ciphers'] = 'HIGH:!aNULL:!SSLv2:!RC4:!3DES:!MD5'
+        return original(*args, **kwargs)
 
-    def ssl_monkey():
-        import ssl
+    ssl.wrap_socket = wrap_socket_monkey
 
-        original = ssl.wrap_socket
-
-        def wrap_socket_monkey(*args, **kwargs):
-            # Set up an OpenSSL cipher string.
-            #
-            # Rationale behind each part:
-            #
-            # * HIGH: only use the most secure class of ciphers and
-            #   key lengths, generally being 128 bits and larger.
-            #
-            # * !aNULL: exclude cipher suites that contain anonymous
-            #   key exchange, making man in the middle attacks much
-            #   more tractable.
-            #
-            # * !SSLv2: exclude any SSLv2 cipher suite, as this
-            #   category has security weaknesses.  There is only one
-            #   OpenSSL cipher suite that is in the "HIGH" category
-            #   but uses SSLv2 protocols: DES_192_EDE3_CBC_WITH_MD5
-            #   (see s2_lib.c)
-            #
-            #   Technically redundant given "!3DES", but the intent in
-            #   listing it here is more apparent.
-            #
-            # * !RC4: exclude because it's a weak block cipher.
-            #
-            # * !3DES: exclude because it's very CPU intensive and
-            #   most peers support another reputable block cipher.
-            #
-            # * !MD5: although it doesn't seem use of known flaws in
-            #   MD5 is able to compromise an SSL session, the wide
-            #   deployment of SHA-family functions means the
-            #   compatibility benefits of allowing it are slim to
-            #   none, so disable it until someone produces material
-            #   complaint.
-            kwargs['ciphers'] = 'HIGH:!aNULL:!SSLv2:!RC4:!3DES:!MD5'
-            return original(*args, **kwargs)
-
-        ssl.wrap_socket = wrap_socket_monkey
-
-    ssl_monkey()
+ssl_monkey()
 
 import argparse
 import logging
 import os
 import re
+import subprocess
 import textwrap
 import traceback
 
 from wal_e import log_help
 
-from wal_e import subprocess
 from wal_e.exception import UserCritical
 from wal_e.exception import UserException
 from wal_e import storage
@@ -130,7 +114,7 @@ def external_program_check(
         raise EnvironmentError('INTERNAL: Had problems running psql '
                                'from external_program_check')
 
-    with open(os.devnull, 'w') as nullf:
+    with open(os.devnull, 'wb') as nullf:
         for program in to_check:
             try:
                 if program is PSQL_BIN:
@@ -195,6 +179,13 @@ def build_parser():
                            'with this instance to authenticate with the S3 '
                            'API.')
 
+    gs_group = parser.add_mutually_exclusive_group()
+    gs_group.add_argument('--gs-access-key-id',
+                          help='public GS access key. Can also be defined '
+                          'in an environment variable. If both are defined, '
+                          'the one defined in the programs arguments takes '
+                          'precedence.')
+
     parser.add_argument('-a', '--wabs-account-name',
                         help='Account name of Windows Azure Blob Service '
                         'account. Can also be defined in an environment'
@@ -210,6 +201,11 @@ def build_parser():
                         help='Storage prefix to run all commands against.  '
                         'Can also be defined via environment variable '
                         'WALE_WABS_PREFIX.')
+
+    parser.add_argument('--gs-prefix',
+                        help='Storage prefix to run all commands against. '
+                        'Can also be defined via environment variable '
+                        'WALE_GS_PREFIX.')
 
     parser.add_argument(
         '--gpg-key-id',
@@ -278,7 +274,7 @@ def build_parser():
         parents=[wal_fetchpush_parent])
 
     wal_push_parser.add_argument(
-        '--pool-size', '-p', type=int, default=8,
+        '--pool-size', '-p', type=int, default=32,
         help='Set the maximum number of concurrent transfers')
 
     # backup-fetch operator section
@@ -414,19 +410,41 @@ def s3_instance_profile(args):
     return s3.InstanceProfileCredentials()
 
 
+def gs_creds(args):
+    from wal_e.blobstore import gs
+
+    if args.gs_instance_metadata:
+        access_key, secret_key = None, None
+    else:
+        access_key = args.gs_access_key_id or os.getenv('GS_ACCESS_KEY_ID')
+        if access_key is None:
+            raise UserException(
+                msg='GS Access Key credential is required but not provided',
+                hint=(_config_hint_generate('gs-access-key-id', True)))
+
+        secret_key = os.getenv('GS_SECRET_ACCESS_KEY')
+        if secret_key is None:
+            raise UserException(
+                msg='GS Secret Key credential is required but not provided',
+                hint=_config_hint_generate('gs-secret-access-key', False))
+
+    return gs.Credentials(access_key, secret_key)
+
+
 def configure_backup_cxt(args):
     # Try to find some WAL-E prefix to store data in.
-    prefix = (args.s3_prefix or args.wabs_prefix
+    prefix = (args.s3_prefix or args.wabs_prefix or args.gs_prefix
               or os.getenv('WALE_S3_PREFIX') or os.getenv('WALE_WABS_PREFIX')
-              or os.getenv('WALE_SWIFT_PREFIX'))
+              or os.getenv('WALE_GS_PREFIX') or os.getenv('WALE_SWIFT_PREFIX'))
 
     if prefix is None:
         raise UserException(
             msg='no storage prefix defined',
             hint=(
-                'Either set one of the --wabs-prefix or --s3-prefix options or'
-                ' define one of the WALE_WABS_PREFIX, WALE_S3_PREFIX, or '
-                'WALE_SWIFT_PREFIX environment variables.'
+                'Either set one of the --wabs-prefix, --s3-prefix or '
+                '--gs-prefix options or define one of the WALE_WABS_PREFIX, '
+                'WALE_S3_PREFIX, WALE_SWIFT_PREFIX or WALE_GS_PREFIX '
+                'environment variables.'
             )
         )
 
@@ -489,6 +507,9 @@ def configure_backup_cxt(args):
             os.getenv('SWIFT_AUTH_VERSION', '2'),
         )
         return SwiftBackup(store, creds, gpg_key_id)
+    elif store.is_gs:
+        from wal_e.operator.gs_operator import GSBackup
+        return GSBackup(store, gpg_key_id)
     else:
         raise UserCritical(
             msg='no unsupported blob stores should get here',
@@ -507,8 +528,11 @@ def render_subcommand(args):
     """Render a subcommand for human-centric viewing"""
     if args.subcommand == 'delete':
         return 'delete ' + args.delete_subcommand
-    else:
-        return args.subcommand
+
+    if args.subcommand in ('wal-prefetch', 'wal-push', 'wal-fetch'):
+        return None
+
+    return args.subcommand
 
 
 def main():
@@ -525,16 +549,17 @@ def main():
     if subcommand == 'version':
         import pkgutil
 
-        print pkgutil.get_data('wal_e', 'VERSION').strip()
+        print(pkgutil.get_data('wal_e', 'VERSION').decode('ascii').strip())
         sys.exit(0)
 
     # Print a start-up message right away.
     #
     # Otherwise, it is hard to tell when and how WAL-E started in logs
     # because often emits status output too late.
-    logger.info(msg='starting WAL-E',
-                detail=('The subcommand is "{0}".'
-                        .format(render_subcommand(args))))
+    rendered = render_subcommand(args)
+    if rendered is not None:
+        logger.info(msg='starting WAL-E',
+                    detail='The subcommand is "{0}".'.format(rendered))
 
     try:
         backup_cxt = configure_backup_cxt(args)
@@ -604,16 +629,10 @@ def main():
                 logger.info(msg='performing dry run of data deletion')
                 is_dry_run_really = True
 
-                import boto.s3.key
-                import boto.s3.bucket
-
                 # This is not necessary, but "just in case" to find bugs.
                 def just_error(*args, **kwargs):
                     assert False, ('About to delete something in '
                                    'dry-run mode.  Please report a bug.')
-
-                boto.s3.key.Key.delete = just_error
-                boto.s3.bucket.Bucket.delete_keys = just_error
 
             # Handle the subcommands and route them to the right
             # implementations.
@@ -650,11 +669,11 @@ def main():
 
             raise backup_cxt.exceptions[-1]
 
-    except UserException, e:
+    except UserException as e:
         logger.log(level=e.severity,
                    msg=e.msg, detail=e.detail, hint=e.hint)
         sys.exit(1)
-    except Exception, e:
+    except Exception as e:
         logger.critical(
             msg='An unprocessed exception has avoided all error handling',
             detail=''.join(traceback.format_exception(*sys.exc_info())))

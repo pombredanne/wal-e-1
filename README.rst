@@ -58,6 +58,9 @@ AWS S3 and Work-alikes
 Optional:
 
 * WALE_S3_ENDPOINT: See `Manually specifying the S3 Endpoint`_
+* AWS_SECURITY_TOKEN: When using AWS STS
+* Pass ``--aws-instance-profile`` to gather credentials from the
+  Instance Profile.  See `Using AWS IAM Instance Profiles`.
 
 Azure Blob Store
 ''''''''''''''''
@@ -66,6 +69,12 @@ Azure Blob Store
 * WABS_ACCOUNT_NAME
 * WABS_ACCESS_KEY or
 * WABS_SAS_TOKEN
+
+Google Storage
+''''''''''''''
+
+* WALE_GS_PREFIX (e.g. ``gs://bucket/path/optionallymorepath``)
+* GOOGLE_APPLICATION_CREDENTIALS
 
 Swift
 '''''
@@ -104,6 +113,7 @@ will attempt to resolve them:
 * gevent>=1.0.2
 * boto>=2.24.0
 * azure>=0.7.0
+* gcloud>=0.8.0
 * python-swiftclient>=1.8.0
 * python-keystoneclient>=0.4.2
 * argparse, if not on Python 2.7
@@ -137,6 +147,12 @@ Push a base backup to Swift::
     SWIFT_USER="my_user"                                       \
     SWIFT_PASSWORD="my_password" wal-e                         \
     backup-push /var/lib/my/database
+
+Push a base backup to Google Cloud Storage::
+
+  $ WALE_GS_PREFIX="gs://some-bucket/directory-or-whatever"     \
+    GOOGLE_APPLICATION_CREDENTIALS=...                          \
+    wal-e backup-push /var/lib/my/database
 
 It is generally recommended that one use some sort of environment
 variable management with WAL-E: working with it this way is less verbose,
@@ -622,16 +638,13 @@ the development environment.  All additional dependencies of WAL-E are
 managed by tox_.  In addition, the coding conventions are checked by
 the tox_ configuration included with WAL-E.
 
-To run the tests, one need only run::
+To run the tests, run::
 
   $ tox -e py27
 
-There are a variety of other environments tested by ``tox`` handling
-old and new library versions, but ``-e py27`` is normally the
-environment one should iterate with.
-
 To run a somewhat more lengthy suite of integration tests that
-communicate with AWS S3, one might run tox_ like this::
+communicate with a real blob store account, one might run tox_ like
+this::
 
   $ WALE_S3_INTEGRATION_TESTS=TRUE      \
     AWS_ACCESS_KEY_ID=[AKIA...]         \
@@ -639,6 +652,8 @@ communicate with AWS S3, one might run tox_ like this::
     WALE_WABS_INTEGRATION_TESTS=TRUE    \
     WABS_ACCOUNT_NAME=[...]             \
     WABS_ACCESS_KEY=[...]               \
+    WALE_GS_INTEGRATION_TESTS=TRUE      \
+    GOOGLE_APPLICATION_CREDENTIALS=[~/my-credentials.json] \
     tox -e py27 -- -n 8
 
 Looking carefully at the above, notice the ``-n 8`` added the tox_
@@ -651,29 +666,9 @@ tests complete a small fraction of the time it would take otherwise.
 It is a design requirement of new tests that parallel execution not be
 sacrificed.
 
-The above invocation tests WAL-E with every test environment
-defined in ``tox.ini``.  When iterating, testing all of those is
-typically not a desirable use of time, so one can restrict the
-integration test to one virtual environment, in a combination of
-features seen in all the previous examples::
-
-  $ WALE_S3_INTEGRATION_TESTS=TRUE      \
-    AWS_ACCESS_KEY_ID=[AKIA...]         \
-    AWS_SECRET_ACCESS_KEY=[...]         \
-    WALE_WABS_INTEGRATION_TESTS=TRUE    \
-    WABS_ACCOUNT_NAME=[...]             \
-    WABS_ACCESS_KEY=[...]               \
-    tox -e py27 -- -n 8
-
 Coverage testing can be used by combining any of these using
 pytest-cov_, e.g.: ``tox -- --cov wal_e`` and
 ``tox -- --cov wal_e --cov-report html; see htmlcov/index.html``.
-
-Finally, the test framework used is pytest_.  If possible, do not
-submit Python unittest_ style tests: those tend to be more verbose and
-anemic in power; however, any automated testing is better than a lack
-thereof, so if you are familiar with unittest_, do not let the
-preference for pytest_ idiom be an impediment to submitting code.
 
 .. _tox: https://pypi.python.org/pypi/tox
 .. _pytest: https://pypi.python.org/pypi/pytest
